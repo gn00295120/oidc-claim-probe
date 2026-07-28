@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - ".github/workflows/oidc-claim-probe.yml"
-      - "probe-aud.txt"
       - "scripts/**"
 permissions:
   id-token: write
@@ -16,23 +15,28 @@ jobs:
       fail-fast: false
       matrix:
         audience:
-          - "sts.amazonaws.com"
-          - "https://github.com/gn00295120"
           - "https://github.com/github"
-          - "api://AzureADTokenExchange"
-          - "https://gitlab.com"
-          - "https://token.actions.githubusercontent.com"
-          - "https://npm.pkg.github.com"
-          - "*"
-          - "https://example.com/custom"
+          - "https://github.com/GitHub"
+          - "https://github.com/github/"
+          - "https://github.com/github "
+          - "https://github.com/github%2ecom"
+          - "https://github.com/actions"
+          - "https://github.com/github/oidc-claim-probe"
+          - "https://api.github.com"
+          - "https://github.com"
+          - "github.com/github"
+          - "https://github.com/github?x=1"
+          - "https://github.com/github#"
+          - "https://github.com/github\t"
+          - "https://github.com/gn00295120"
+          - "https://github.com/github-production"
     steps:
       - uses: actions/checkout@v4
       - name: Decode OIDC claims
         env:
           AUD: ${{ matrix.audience }}
         run: python3 scripts/decode_oidc.py
-      - name: Upload claims only
-        if: always()
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: oidc-claims-${{ strategy.job-index }}
