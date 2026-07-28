@@ -1,0 +1,118 @@
+name: fulcio-githubapp-probe
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  fulcio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe GitHub Fulcio with Actions OIDC
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 <<'PY2'
+          import os, json, base64, urllib.request, urllib.error, urllib.parse, subprocess, tempfile
+          from pathlib import Path
+          out=Path("out")
+          url=os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          rtok=os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+          # mint OIDC for sigstore / fulcio audiences commonly used
+          auds=[
+            "sigstore",
+            "https://fulcio.githubapp.com",
+            "https://oauth2.sigstore.dev/auth",
+            "https://fulcio.sigstore.dev",
+            "https://github.com/login/oauth",
+          ]
+          mints=[]
+          for aud in auds:
+              sep="&" if "?" in url else "?"
+              q=urllib.parse.urlencode({"audience":aud})
+              req=urllib.request.Request(url+sep+q, headers={"Authorization":f"bearer {rtok}","Accept":"application/json; api-version=2.0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      jwt=json.load(resp)["value"]
+                      code=200
+              except urllib.error.HTTPError as e:
+                  mints.append({"aud":aud,"code":e.code})
+                  print("mint fail",aud,e.code)
+                  continue
+              claims=json.loads(base64.urlsafe_b64decode(jwt.split(".")[1]+"===="))
+              keep={k:claims.get(k) for k in ["sub","aud","iss","repository","job_workflow_ref","workflow_ref"]}
+              mints.append({"aud":aud,"code":code,"claims":keep})
+              # save jwt temporarily for request
+              (out/f"jwt-{aud.replace('://','_').replace('/','_')}.txt").write_text("REDACTED_LEN_"+str(len(jwt)))
+              # Generate ephemeral key + CSR-like proof for Fulcio v2
+              # Use openssl for key
+              subprocess.check_call(["openssl","ecparam","-genkey","-name","prime256v1","-out","/tmp/key.pem"])
+              # Get public key PEM
+              pub=subprocess.check_output(["openssl","ec","-in","/tmp/key.pem","-pubout"], text=True)
+              # Fulcio v1 signingCert API expects {"identityToken","publicKey":{"content","algorithm"},"signedEmailAddress"?}
+              # Try multiple API shapes without logging jwt
+              bodies=[
+                {"identityToken": jwt, "publicKey": {"content": base64.b64encode(pub.encode()).decode(), "algorithm": "ecdsa"}},
+                {"credentials":{"oidcIdentityToken": jwt}, "publicKeyRequest":{"publicKey":{"algorithm":"ECDSA_P256_SHA_256","content": base64.b64encode(pub.encode()).decode()}, "proofOfPossession":""}},
+              ]
+              # Also try with proof of possession: sign challenge
+              # Create signed email/subject proof: sign the token subject
+              import hashlib
+              from cryptography.hazmat.primitives import hashes, serialization
+              from cryptography.hazmat.primitives.asymmetric import ec
+              try:
+                  from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+              except Exception:
+                  pass
+              # Use openssl dgst -sign for proof
+              proof_msg = claims.get("sub","") or "proof"
+              open("/tmp/proofmsg","w").write(proof_msg)
+              subprocess.check_call(["openssl","dgst","-sha256","-sign","/tmp/key.pem","-out","/tmp/proof.sig","/tmp/proofmsg"])
+              proof_b64=base64.b64encode(open("/tmp/proof.sig","rb").read()).decode()
+              bodies.append({
+                "credentials":{"oidcIdentityToken": jwt},
+                "publicKeyRequest":{
+                  "publicKey":{"algorithm":"ECDSA_P256_SHA_256","content": base64.b64encode(pub.encode()).decode()},
+                  "proofOfPossession": proof_b64
+                }
+              })
+              endpoints=[
+                "https://fulcio.githubapp.com/api/v1/signingCert",
+                "https://fulcio.githubapp.com/api/v2/signingCert",
+                "https://fulcio.sigstore.dev/api/v1/signingCert",
+              ]
+              for ep in endpoints:
+                  for i,body in enumerate(bodies):
+                      data=json.dumps(body).encode()
+                      req=urllib.request.Request(ep, data=data, method="POST", headers={
+                          "Content-Type":"application/json",
+                          "User-Agent":"lucasfutures-research",
+                          "X-HackerOne-Research":"lucasfutures",
+                          "Accept":"application/pem-certificate-chain, application/json",
+                      })
+                      try:
+                          with urllib.request.urlopen(req, timeout=30) as resp:
+                              b=resp.read()
+                              # Redact: store status + cert subject only
+                              text=b.decode("utf-8","replace")
+                              rec={"aud":aud,"ep":ep,"body_idx":i,"status":resp.status,"len":len(b),"preview":text[:200], "has_begin":"BEGIN CERTIFICATE" in text}
+                              open(f"out/fulcio-resp-{abs(hash(ep+aud+str(i)))%10**8}.txt","w").write(text[:5000] if "BEGIN" in text else text[:500])
+                              print("RESP", rec)
+                              open("out/results.jsonl","a").write(json.dumps(rec)+"\n")
+                      except urllib.error.HTTPError as e:
+                          b=e.read().decode("utf-8","replace")
+                          rec={"aud":aud,"ep":ep,"body_idx":i,"status":e.code,"body":b[:300]}
+                          print("HTTP", rec)
+                          open("out/results.jsonl","a").write(json.dumps(rec)+"\n")
+                      except Exception as e:
+                          rec={"aud":aud,"ep":ep,"body_idx":i,"error":str(e)[:200]}
+                          print("ERR", rec)
+                          open("out/results.jsonl","a").write(json.dumps(rec)+"\n")
+              jwt=None
+          (out/"mints.json").write_text(json.dumps(mints,indent=2))
+          print("done mints", mints)
+          PY2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fulcio-probe-out
+          path: out/
