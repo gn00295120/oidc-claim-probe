@@ -1,0 +1,38 @@
+name: oidc-sub-custom
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/oidc-sub-custom.yml"]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint under current sub template
+        env:
+          AUD: "https://example.com/sub-custom"
+          PROBE_NAME: sub-custom-current
+        run: python3 scripts/rp_probe.py --claims-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sub-custom-claims
+          path: rp-result.json
+          retention-days: 3
+  mint-env:
+    runs-on: ubuntu-latest
+    environment: research-prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint env job under custom sub
+        env:
+          AUD: "https://example.com/sub-custom-env"
+          PROBE_NAME: sub-custom-env
+        run: python3 scripts/rp_probe.py --claims-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sub-custom-env-claims
+          path: rp-result.json
+          retention-days: 3
