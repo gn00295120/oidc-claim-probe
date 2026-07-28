@@ -1,0 +1,102 @@
+name: oidc-residual-e2e
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+jobs:
+  mint-and-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint audiences and probe RPs (claims only)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 <<'PY2'
+          import json, os, base64, urllib.request, urllib.parse, urllib.error
+          from pathlib import Path
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          tok = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+          auds = [
+            "https://collector.github.com",
+            "https://github.blog",
+            "https://raw.githubusercontent.com",
+            "https://objects.githubusercontent.com",
+            "https://uploads.github.com",
+            "https://npm.pkg.github.com",
+            "sts.amazonaws.com",
+            "https://sts.amazonaws.com",
+            "https://gitlab.com",
+            "api://AzureADTokenExchange",
+            "https://iam.googleapis.com/projects/000000000000/locations/global/workloadIdentityPools/github/providers/github",
+            "https://maven.pkg.github.com",
+            "https://pkg.github.com",
+          ]
+          out = Path("out")
+          lines=[]
+          probes_all=[]
+          for aud in auds:
+              q = urllib.parse.urlencode({"audience": aud})
+              # ACTIONS_ID_TOKEN_REQUEST_URL already has query
+              sep = "&" if "?" in url else "?"
+              req = urllib.request.Request(url + sep + q, headers={
+                  "Authorization": f"bearer {tok}",
+                  "Accept": "application/json; api-version=2.0",
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      body = json.load(resp)
+                      code = resp.status
+              except urllib.error.HTTPError as e:
+                  code = e.code
+                  body = {}
+                  try: body = json.loads(e.read().decode())
+                  except: body = {"error": e.read().decode()[:200] if False else str(e)}
+                  lines.append({"aud":aud,"code":code,"claims":None})
+                  print("fail", aud, code)
+                  continue
+              jwt = body.get("value","")
+              parts = jwt.split(".")
+              pad = "=" * ((4 - len(parts[1]) % 4) % 4)
+              claims = json.loads(base64.urlsafe_b64decode(parts[1]+pad))
+              keep = {k: claims.get(k) for k in [
+                  "sub","aud","iss","repository","repository_id","repository_owner",
+                  "job_workflow_ref","workflow_ref","actor","ref","environment","run_id","event_name"]}
+              lines.append({"aud":aud,"code":code,"claims":keep})
+              print("ok", aud, "sub", keep.get("sub"))
+              # probe with this jwt then discard
+              for name, target in [
+                  ("api_user","https://api.github.com/user"),
+                  ("collector","https://collector.github.com/"),
+                  ("npm_pkg","https://npm.pkg.github.com/"),
+                  ("ghcr","https://ghcr.io/v2/"),
+                  ("uploads","https://uploads.github.com/"),
+                  ("sts","https://sts.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15"),
+              ]:
+                  try:
+                      r = urllib.request.Request(target, headers={
+                          "Authorization": f"Bearer {jwt}",
+                          "User-Agent": "oidc-residual",
+                          "X-HackerOne-Research": "lucasfutures",
+                          "Accept": "application/vnd.github+json",
+                      })
+                      with urllib.request.urlopen(r, timeout=15) as resp:
+                          b = resp.read(180).decode("utf-8","replace")
+                          probes_all.append({"aud":aud,"probe":name,"status":resp.status,"body":b})
+                  except Exception as e:
+                      code2 = getattr(e, "code", None)
+                      b = ""
+                      if hasattr(e, "read"):
+                          try: b = e.read(180).decode("utf-8","replace")
+                          except: pass
+                      probes_all.append({"aud":aud,"probe":name,"status":code2,"error":str(e)[:160],"body":b})
+              jwt = None
+          (out/"mint-status.json").write_text(json.dumps(lines, indent=2))
+          (out/"probes.json").write_text(json.dumps(probes_all, indent=2))
+          print("wrote", len(lines), "mints", len(probes_all), "probes")
+          PY2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oidc-residual-out
+          path: out/
