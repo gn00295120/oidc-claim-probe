@@ -1,0 +1,45 @@
+name: env-protection-probe
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: ['env-probe/**', 'main']
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  try-protected:
+    runs-on: ubuntu-latest
+    environment: protected-lab
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show context and secret presence
+        env:
+          MARKER: ${{ secrets.LAB_MARKER }}
+          AUD: "https://example.com/env-protection"
+          PROBE_NAME: protected-lab-access
+        run: |
+          python3 - <<'PY'
+          import os, json
+          m = os.environ.get("MARKER") or ""
+          out = {
+            "ref": os.environ.get("GITHUB_REF"),
+            "event": os.environ.get("GITHUB_EVENT_NAME"),
+            "sha": os.environ.get("GITHUB_SHA"),
+            "actor": os.environ.get("GITHUB_ACTOR"),
+            "marker_present": bool(m),
+            "marker_len": len(m),
+            "marker_prefix": m[:12] if m else "",
+          }
+          print(json.dumps(out, indent=2))
+          open("env-access.json","w").write(json.dumps(out, indent=2))
+          PY
+          python3 scripts/rp_probe.py --claims-only || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-protection-${{ github.event_name }}-${{ github.run_id }}
+          path: |
+            env-access.json
+            rp-result.json
+          retention-days: 3
