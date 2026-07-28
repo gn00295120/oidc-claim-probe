@@ -1,0 +1,218 @@
+# Authorized H1 research (lucasfutures): OIDC RP acceptance + env claim + authz edges.
+# Non-destructive: never publishes packages, never writes foreign repos.
+# Artifacts contain status/claims only — never raw JWT.
+name: oidc-rp-accept
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/oidc-rp-accept.yml"
+      - "scripts/rp_probe.py"
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+  attestations: write
+  actions: read
+
+jobs:
+  # H1: Does GitHub accept Actions OIDC JWT as Bearer against its own APIs/packages?
+  rp-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - audience: "https://api.github.com"
+            name: api-github
+          - audience: "https://github.com"
+            name: github-root
+          - audience: "https://npm.pkg.github.com"
+            name: npm-pkg
+          - audience: "https://maven.pkg.github.com"
+            name: maven-pkg
+          - audience: "https://ghcr.io"
+            name: ghcr
+          - audience: "ghcr.io"
+            name: ghcr-bare
+          - audience: "https://containers.pkg.github.com"
+            name: containers-pkg
+          - audience: "https://uploads.github.com"
+            name: uploads
+          - audience: "https://codeload.github.com"
+            name: codeload
+          - audience: "https://token.actions.githubusercontent.com"
+            name: actions-token-iss
+          - audience: "*"
+            name: star-aud
+          - audience: "sts.amazonaws.com"
+            name: aws-sts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint OIDC and probe RPs (no JWT in artifacts)
+        env:
+          AUD: ${{ matrix.audience }}
+          PROBE_NAME: ${{ matrix.name }}
+          GITHUB_API: https://api.github.com
+        run: python3 scripts/rp_probe.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rp-${{ matrix.name }}
+          path: rp-result.json
+          retention-days: 3
+
+  # H2: environment claim presence / spoofability
+  env-claim:
+    runs-on: ubuntu-latest
+    environment: research-prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint with environment claim
+        env:
+          AUD: "https://example.com/env-probe"
+          PROBE_NAME: env-research-prod
+        run: python3 scripts/rp_probe.py --claims-only
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-claim-research-prod
+          path: rp-result.json
+          retention-days: 3
+
+  # H3: environment name that looks like github path (confusion for string matchers)
+  env-claim-githubish:
+    runs-on: ubuntu-latest
+    environment: github
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint with environment=github
+        env:
+          AUD: "https://example.com/env-probe"
+          PROBE_NAME: env-github-name
+        run: python3 scripts/rp_probe.py --claims-only
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-claim-github-name
+          path: rp-result.json
+          retention-days: 3
+
+  # H4: no environment baseline
+  no-env-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint without environment
+        env:
+          AUD: "https://example.com/env-probe"
+          PROBE_NAME: no-env
+        run: python3 scripts/rp_probe.py --claims-only
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-claim-none
+          path: rp-result.json
+          retention-days: 3
+
+  # H5: call public github attest reusable — provenance should bind to CALLER repo
+  call-public-attest:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dummy subject
+        run: |
+          echo "attest-probe-$(date -u +%Y%m%dT%H%M%SZ)" > artifact.bin
+          sha256sum artifact.bin | tee subject.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact
+          path: artifact.bin
+      - name: Local attest-build-provenance (control)
+        id: att
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifact.bin
+      - name: Record attestation metadata (no private material)
+        env:
+          BUNDLE: ${{ steps.att.outputs.bundle-path }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          out = {
+            "bundle_path_set": bool(os.environ.get("BUNDLE")),
+            "bundle_path": os.environ.get("BUNDLE") or "",
+          }
+          p = os.environ.get("BUNDLE")
+          if p and pathlib.Path(p).exists():
+            raw = pathlib.Path(p).read_text()
+            # Redact: keep structure keys only, strip signatures/tokens
+            try:
+              data = json.loads(raw)
+              out["bundle_top_keys"] = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+              # dsseEnvelope payload type if present
+              if isinstance(data, dict):
+                out["mediaType"] = data.get("mediaType")
+                dsse = data.get("dsseEnvelope") or data.get("dsseenvelope")
+                if isinstance(dsse, dict):
+                  out["dsse_payloadType"] = dsse.get("payloadType")
+            except Exception as e:
+              out["parse_error"] = str(e)[:200]
+              out["bundle_bytes"] = pathlib.Path(p).stat().st_size
+          pathlib.Path("attest-meta.json").write_text(json.dumps(out, indent=2))
+          print(json.dumps(out, indent=2))
+          PY
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attest-local-meta
+          path: |
+            attest-meta.json
+            subject.sha256
+          retention-days: 3
+
+  # H6: extra audience blocklist edges not covered earlier
+  blocklist-edges:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        audience:
+          - "https://github.com/GitHub/"
+          - "HTTPS://GITHUB.COM/GITHUB"
+          - "https://github.com/github.com"
+          - "https://github.com/github%00"
+          - "https://github.com/githu%62"  # github via encoding?
+          - "https://www.github.com/github"
+          - "https://github.com/github%2f.."
+          - "https://github.com/./github"
+          - "https://github.com/actions/"
+          - "https://github.com/actions/checkout"
+          - "https://github.com/dependabot"
+          - "https://github.com/github-enterprise"
+          - "https://github.blog"
+          - "https://raw.githubusercontent.com"
+          - "https://objects.githubusercontent.com"
+          - "https://camo.githubusercontent.com"
+          - "https://avatars.githubusercontent.com"
+          - "https://api.github.com/graphql"
+          - "https://github.com/login/oauth"
+          - "https://collector.github.com"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Blocklist edge claim attempt
+        env:
+          AUD: ${{ matrix.audience }}
+          PROBE_NAME: block-${{ strategy.job-index }}
+        run: python3 scripts/rp_probe.py --claims-only
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-edge-${{ strategy.job-index }}
+          path: rp-result.json
+          retention-days: 3
