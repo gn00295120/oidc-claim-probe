@@ -12,14 +12,29 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        audience:
+          - "sts.amazonaws.com"
+          - "https://github.com/gn00295120"
+          - "https://github.com/github"
+          - "api://AzureADTokenExchange"
+          - "https://gitlab.com"
+          - "https://token.actions.githubusercontent.com"
+          - "https://npm.pkg.github.com"
+          - "*"
+          - "https://example.com/custom"
     steps:
       - uses: actions/checkout@v4
       - name: Decode OIDC claims
+        env:
+          AUD: ${{ matrix.audience }}
         run: python3 scripts/decode_oidc.py
       - name: Upload claims only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oidc-claims
+          name: oidc-claims-${{ strategy.job-index }}
           path: oidc-claims.json
           retention-days: 1
