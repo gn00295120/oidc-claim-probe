@@ -1,15 +1,11 @@
-name: OIDC Claim Probe (authorized research)
+name: oidc-claim-probe
 on:
   workflow_dispatch:
-    inputs:
-      audience:
-        description: "OIDC audience to request"
-        required: true
-        default: "sts.amazonaws.com"
   push:
     paths:
-      - '.github/workflows/oidc-claim-probe.yml'
-      - 'probe-aud.txt'
+      - ".github/workflows/oidc-claim-probe.yml"
+      - "probe-aud.txt"
+      - "scripts/**"
 permissions:
   id-token: write
   contents: read
@@ -18,44 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Request OIDC token and decode claims
-        env:
-          AUD: ${{ github.event.inputs.audience || 'sts.amazonaws.com' }}
-        run: |
-          set -euo pipefail
-          if [ -f probe-aud.txt ]; then AUD=$(cat probe-aud.txt); fi
-          echo "Audience=$AUD"
-          export AUD
-          ENC_AUD=$(python3 -c 'import urllib.parse,os; print(urllib.parse.quote(os.environ["AUD"], safe=""))')
-          HTTP_CODE=$(curl -sS -o /tmp/oidc.json -w "%{http_code}" \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ENC_AUD}" || true)
-          echo "HTTP=$HTTP_CODE"
-          head -c 400 /tmp/oidc.json; echo
-          python3 <<'PY'
-import json, base64, sys, os
-raw=open('/tmp/oidc.json').read()
-try:
-  d=json.loads(raw)
-except Exception as e:
-  open('oidc-claims.json','w').write(json.dumps({'error':'non-json','body':raw[:500]}))
-  print(raw[:500]); sys.exit(0)
-jwt=d.get('value') or d.get('token') or ''
-if not jwt:
-  open('oidc-claims.json','w').write(json.dumps({'error':'no-jwt','body':d}, default=str))
-  print('no jwt', d); sys.exit(0)
-parts=jwt.split('.')
-pad='='*((4-len(parts[1])%4)%4)
-payload=json.loads(base64.urlsafe_b64decode(parts[1]+pad))
-print(json.dumps(payload, indent=2, sort_keys=True))
-open('oidc-claims.json','w').write(json.dumps({'audience_requested':os.environ.get('AUD'),'claims':payload,'claim_keys':sorted(payload.keys())}, indent=2))
-print('sub=', payload.get('sub'))
-print('repository=', payload.get('repository'))
-print('job_workflow_ref=', payload.get('job_workflow_ref'))
-print('aud=', payload.get('aud'))
-print('iss=', payload.get('iss'))
-PY
-      - if: always()
+      - name: Decode OIDC claims
+        run: python3 scripts/decode_oidc.py
+      - name: Upload claims only
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: oidc-claims
